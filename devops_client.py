@@ -6,7 +6,6 @@ sowie Anhänge (Bilder) über die REST API.
 """
 from __future__ import annotations
 
-import base64
 import re
 from dataclasses import dataclass, field
 from typing import Optional
@@ -58,13 +57,12 @@ class AzureDevOpsClient:
         self.organization_url = organization_url.rstrip("/") if organization_url else ""
         self.project = project
         self.project_id = project_id or project
-        self.pat = pat
-        # PAT in HTTP Basic Auth (leerer Username)
-        token = base64.b64encode(f":{pat}".encode("utf-8")).decode("ascii")
+        self.pat = (pat or "").strip()
         self.session = requests.Session()
+        self.session.auth = requests.auth.HTTPBasicAuth("", self.pat)
         self.session.headers.update({
-            "Authorization": f"Basic {token}",
             "Accept": "application/json",
+            "User-Agent": "DevOpsExport/1.0",
         })
         self.api_version = "7.1"
 
@@ -178,16 +176,18 @@ class AzureDevOpsClient:
                     tags.append(name.strip())
             return sorted({t.lower() for t in tags})
         except Exception:
-            # Fallback: direkt über die WorkItems-Batch-API, ohne WIQL-Query.
-            # Das vermeidet die 400er-Fehler bei Projektnamen mit Leerzeichen.
+            # Fallback: Tags direkt aus Work Items im aktuellen Projekt lesen.
+            # Das ist robuster bei Projektnamen mit Leerzeichen oder API-Varianten.
             project_path = quote(self.project_id, safe="")
             url = f"{self.organization_url}/{project_path}/_apis/wit/wiql"
             try:
+                project_filter = f"AND [System.TeamProject] = '{self.project}'" if self.project else ""
                 result = self._post(url, {
                     "query": (
                         "SELECT [System.Id] "
                         "FROM WorkItems "
                         "WHERE [System.Tags] <> '' "
+                        f"{project_filter} "
                         "ORDER BY [System.Id] ASC"
                     )
                 })
@@ -206,7 +206,7 @@ class AzureDevOpsClient:
                 data = self._post(url, body)
                 for raw in data.get("value", []):
                     field_tags = raw.get("fields", {}).get("System.Tags", "") or ""
-                    for tag in re.split(r"[;]+", field_tags):
+                    for tag in re.split(r"[;,]+", field_tags):
                         clean = tag.strip().lower()
                         if clean:
                             tags_set.add(clean)

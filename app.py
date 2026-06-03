@@ -58,6 +58,18 @@ def sanitize_filename(name: str) -> str:
     return name or "Detailkonzept"
 
 
+def format_azure_devops_error(exc: Exception) -> str:
+    """Macht 401/403-Fehler für den Nutzer verständlich."""
+    status = getattr(getattr(exc, "response", None), "status_code", None)
+    if status in (401, 403):
+        return (
+            "Azure DevOps hat den PAT abgelehnt (ungültig/abgelaufen oder Rechte fehlen). "
+            "Bitte ein neues PAT mit 'Project and Team (Read)' und 'Work Items (Read)' erzeugen "
+            "und erneut speichern."
+        )
+    return str(exc)
+
+
 def normalize_project_name(name: str) -> str:
     """Normalisiert Projektnamen fuer robuste Vergleiche."""
     return re.sub(r"\s+", " ", (name or "")).strip().casefold()
@@ -111,7 +123,7 @@ with st.expander("🔐 1. Azure DevOps Zugang", expanded=not bool(cfg.get("PAT")
         "Personal Access Token (PAT)",
         value=cfg.get("PAT", ""),
         type="password",
-        help="DevOps → Profilbild → Personal Access Tokens. Berechtigung 'Work Items: Read' reicht.",
+        help="DevOps → Profilbild → Personal Access Tokens. Für Projekte/Tags wird mindestens 'Project and Team (Read)' plus 'Work Items (Read)' benötigt.",
     )
 
     col_a, col_b = st.columns([1, 1])
@@ -132,7 +144,7 @@ with st.expander("🔐 1. Azure DevOps Zugang", expanded=not bool(cfg.get("PAT")
                 st.session_state.tags = []
                 st.success(f"{len(st.session_state.projects)} Projekte gefunden.")
             except Exception as e:
-                st.error(f"Projekte konnten nicht geladen werden: {e}")
+                st.error(f"Projekte konnten nicht geladen werden: {format_azure_devops_error(e)}")
     with col_b:
         if st.button("💾 Zugang speichern", use_container_width=True):
             save_config({
@@ -202,7 +214,7 @@ if project and pat:
                 st.session_state.epics_for_project = (project, only_active)
                 st.success(f"{len(st.session_state.epics)} Epics gefunden.")
             except Exception as e:
-                st.error(f"Epics konnten nicht geladen werden: {e}")
+                st.error(f"Epics konnten nicht geladen werden: {format_azure_devops_error(e)}")
                 with st.expander("Details"):
                     st.code(traceback.format_exc())
 
@@ -216,9 +228,12 @@ if project and pat:
                 )
                 with st.spinner(f"Lade Tags aus '{project}'..."):
                     st.session_state.tags = client.list_tags()
-                st.success(f"{len(st.session_state.tags)} Tags gefunden.")
+                if st.session_state.tags:
+                    st.success(f"{len(st.session_state.tags)} Tags gefunden.")
+                else:
+                    st.info("Keine Tags gefunden – oder der PAT hat keine ausreichenden Rechte für die Tag-Abfrage.")
             except Exception as e:
-                st.error(f"Tags konnten nicht geladen werden: {e}")
+                st.error(f"Tags konnten nicht geladen werden: {format_azure_devops_error(e)}")
                 with st.expander("Details"):
                     st.code(traceback.format_exc())
 
@@ -464,7 +479,7 @@ if st.button(
             )
 
     except Exception as e:
-        st.error(f"Fehler: {e}")
+        st.error(f"Fehler: {format_azure_devops_error(e)}")
         with st.expander("Technische Details"):
             st.code(traceback.format_exc())
 
