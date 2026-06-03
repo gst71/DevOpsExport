@@ -365,6 +365,7 @@ class DetailkonzeptBuilder:
 
     def __init__(self, template_path: str, devops_client: AzureDevOpsClient | None = None,
                  allowed_types: set[str] | None = None,
+                 allowed_tags: set[str] | None = None,
                  show_work_item_id: bool = True,
                  show_estimates_section: bool = True):
         self.template_path = template_path
@@ -374,6 +375,9 @@ class DetailkonzeptBuilder:
         # Epic ist immer enthalten, da es die Wurzel ist.
         self.allowed_types: set[str] | None = (
             set(allowed_types) if allowed_types else None
+        )
+        self.allowed_tags: set[str] | None = (
+            {t.strip().lower() for t in allowed_tags if t and t.strip()} if allowed_tags else None
         )
         # Steuert, ob hinter jedem Titel die Work-Item-ID als (#NNNN)-Hyperlink
         # erscheint. Wenn False, werden Titel "clean" ohne ID gedruckt.
@@ -387,18 +391,27 @@ class DetailkonzeptBuilder:
             return True
         return wi_type in self.allowed_types
 
+    def _tag_allowed(self, tags: str) -> bool:
+        if not self.allowed_tags:
+            return True
+        normalized = {t.strip().lower() for t in (tags or "").split(";") if t and t.strip()}
+        normalized.update({t.strip().lower() for t in (tags or "").split(",") if t and t.strip()})
+        return bool(normalized & self.allowed_tags)
+
     # ----- Public API -----
 
-    def build(self, epic_tree: WorkItem, customer_name: str, output_path: str) -> str:
+    def build(self, epic_trees: WorkItem | list[WorkItem], customer_name: str, output_path: str) -> str:
+        roots = epic_trees if isinstance(epic_trees, list) else [epic_trees]
         doc = Document(self.template_path)
         self._clear_body(doc)
 
-        self._add_title_page(doc, epic_tree, customer_name)
+        self._add_title_page(doc, roots, customer_name)
         self._add_page_break(doc)
         self._add_toc_placeholder(doc)
         self._add_page_break(doc)
 
-        self._add_epic_section(doc, epic_tree)
+        for root in roots:
+            self._add_epic_section(doc, root)
 
         # [Kunde] global ersetzen
         if customer_name:
@@ -487,7 +500,7 @@ class DetailkonzeptBuilder:
 
     # ----- Title Page -----
 
-    def _add_title_page(self, doc: Document, epic: WorkItem, customer: str) -> None:
+    def _add_title_page(self, doc: Document, epics: list[WorkItem], customer: str) -> None:
         """
         Titelseite ohne leere Spacer-Paragraphs aufbauen.
         Stattdessen werden Vor-/Nach-Abstaende auf den eigentlichen Absaetzen
@@ -515,7 +528,11 @@ class DetailkonzeptBuilder:
         add_centered("Detailkonzept", size_pt=28, bold=True,
                      space_before_pt=130, space_after_pt=24)
         # Projekt / Epic
-        add_centered(epic.title or f"Epic {epic.id}", size_pt=18, bold=True,
+        if len(epics) > 1:
+            title_text = "Mehrere Epics"
+        else:
+            title_text = (epics[0].title or f"Epic {epics[0].id}") if epics else "Detailkonzept"
+        add_centered(title_text, size_pt=18, bold=True,
                      space_before_pt=12, space_after_pt=24)
         # Kunde
         add_centered(
@@ -580,6 +597,8 @@ class DetailkonzeptBuilder:
             # Type-Filter: ist dieser Typ aktiv?
             if not self._type_allowed(feature.work_item_type):
                 continue
+            if not self._tag_allowed(feature.tags):
+                continue
 
             self._add_heading(doc, feature.title, level=1,
                               work_item_id=feature.id, work_item_url=feature.url)
@@ -598,6 +617,8 @@ class DetailkonzeptBuilder:
             for story in stories:
                 if not self._type_allowed(story.work_item_type):
                     continue
+                if not self._tag_allowed(story.tags):
+                    continue
                 self._add_heading(doc, story.title, level=2,
                                   work_item_id=story.id, work_item_url=story.url)
                 if story.description_html.strip():
@@ -609,6 +630,8 @@ class DetailkonzeptBuilder:
                 # Tasks = H3
                 for task in story.children:
                     if not self._type_allowed(task.work_item_type):
+                        continue
+                    if not self._tag_allowed(task.tags):
                         continue
                     self._add_heading(doc, task.title, level=3,
                                       work_item_id=task.id, work_item_url=task.url)
@@ -720,8 +743,8 @@ class DetailkonzeptBuilder:
             pl = self._get_estimate(node.raw_fields, self._PL_ESTIMATE_FIELDS,
                                     fallback_pattern="pl")
             # Mindestens einer der beiden Werte muss > 0 sein
-            # und der Typ muss im Filter erlaubt sein.
-            if ((dev and dev > 0) or (pl and pl > 0)) and self._type_allowed(node.work_item_type):
+            # und der Typ sowie Tags muessen im Filter erlaubt sein.
+            if ((dev and dev > 0) or (pl and pl > 0)) and self._type_allowed(node.work_item_type) and self._tag_allowed(node.tags):
                 result.append((node, dev, pl))
             for child in node.children:
                 walk(child)

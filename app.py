@@ -58,6 +58,11 @@ def sanitize_filename(name: str) -> str:
     return name or "Detailkonzept"
 
 
+def normalize_project_name(name: str) -> str:
+    """Normalisiert Projektnamen fuer robuste Vergleiche."""
+    return re.sub(r"\s+", " ", (name or "")).strip().casefold()
+
+
 # ----- UI -----
 
 st.set_page_config(
@@ -78,9 +83,18 @@ if not TEMPLATE_PATH.exists():
 
 cfg = load_config()
 
+
+def get_project_id(name: str) -> str:
+    target = normalize_project_name(name)
+    for item in st.session_state.projects:
+        if normalize_project_name(item.get("name", "")) == target:
+            return item.get("id", "")
+    return ""
+
 # Session-State initialisieren
 for key, default in [("projects", []), ("epics", []),
-                     ("epics_for_project", None), ("selected_project", cfg.get("PROJECT", ""))]:
+                     ("epics_for_project", None), ("selected_project", cfg.get("PROJECT", "")),
+                     ("tags", [])]:
     if key not in st.session_state:
         st.session_state[key] = default
 
@@ -104,11 +118,18 @@ with st.expander("🔐 1. Azure DevOps Zugang", expanded=not bool(cfg.get("PAT")
     with col_a:
         if st.button("🔄 Projekte laden", disabled=not pat, use_container_width=True):
             try:
-                client = AzureDevOpsClient(org_url, "", pat)
+                client = AzureDevOpsClient(org_url, "", pat, "")
                 st.session_state.projects = client.list_projects()
-                # Epics-Cache invalidieren beim neuen Laden
+                if st.session_state.projects:
+                    saved_project = cfg.get("PROJECT", "").strip()
+                    if saved_project and get_project_id(saved_project):
+                        st.session_state.selected_project = saved_project
+                    else:
+                        st.session_state.selected_project = st.session_state.projects[0].get("name", "")
+                # Epics-/Tag-Cache invalidieren beim neuen Laden
                 st.session_state.epics = []
                 st.session_state.epics_for_project = None
+                st.session_state.tags = []
                 st.success(f"{len(st.session_state.projects)} Projekte gefunden.")
             except Exception as e:
                 st.error(f"Projekte konnten nicht geladen werden: {e}")
@@ -129,8 +150,10 @@ st.subheader("📂 2. Projekt auswählen")
 if st.session_state.projects:
     project_names = [p["name"] for p in st.session_state.projects]
     default_idx = 0
-    if st.session_state.selected_project in project_names:
-        default_idx = project_names.index(st.session_state.selected_project)
+    if st.session_state.selected_project:
+        matches = [i for i, name in enumerate(project_names) if normalize_project_name(name) == normalize_project_name(st.session_state.selected_project)]
+        if matches:
+            default_idx = matches[0]
     project = st.selectbox(
         "Projekt",
         project_names,
@@ -154,9 +177,9 @@ else:
 
 # ===== 3. Schritt: Epic =====
 
-st.subheader("🎯 3. Epic auswählen")
+st.subheader("🎯 3. Epics auswählen")
 
-epic_id: int | None = None
+selected_epic_ids: list[int] = []
 
 if project and pat:
     col_x, col_y = st.columns([2, 1])
@@ -168,13 +191,34 @@ if project and pat:
     with col_y:
         if st.button("🔄 Epics laden", use_container_width=True):
             try:
-                client = AzureDevOpsClient(org_url, project, pat)
+                client = AzureDevOpsClient(
+                    org_url,
+                    project,
+                    pat,
+                    get_project_id(project) or project,
+                )
                 with st.spinner(f"Lade Epics aus '{project}'..."):
                     st.session_state.epics = client.list_epics(only_active=only_active)
                 st.session_state.epics_for_project = (project, only_active)
                 st.success(f"{len(st.session_state.epics)} Epics gefunden.")
             except Exception as e:
                 st.error(f"Epics konnten nicht geladen werden: {e}")
+                with st.expander("Details"):
+                    st.code(traceback.format_exc())
+
+        if st.button("🏷️ Tags aus Projekt laden", use_container_width=True):
+            try:
+                client = AzureDevOpsClient(
+                    org_url,
+                    project,
+                    pat,
+                    get_project_id(project) or project,
+                )
+                with st.spinner(f"Lade Tags aus '{project}'..."):
+                    st.session_state.tags = client.list_tags()
+                st.success(f"{len(st.session_state.tags)} Tags gefunden.")
+            except Exception as e:
+                st.error(f"Tags konnten nicht geladen werden: {e}")
                 with st.expander("Details"):
                     st.code(traceback.format_exc())
 
@@ -201,22 +245,21 @@ if project and pat:
                 state_tag = f" [{e['state']}]" if e.get("state") else ""
                 return f"#{e['id']} – {e['title']}{state_tag}"
 
-            selected = st.selectbox(
-                "Epic",
+            selected = st.multiselect(
+                "Epics",
                 filtered,
+                default=[],
                 format_func=fmt,
-                label_visibility="collapsed",
+                help="Mehrere Epics können gleichzeitig ausgewählt werden.",
             )
             if selected:
-                epic_id = selected["id"]
-                # Zusätzliche Info zum gewählten Epic
+                selected_epic_ids = [item["id"] for item in selected]
                 meta_bits = []
-                if selected.get("area_path"):
-                    meta_bits.append(f"Bereich: {selected['area_path']}")
-                if selected.get("iteration_path"):
-                    meta_bits.append(f"Iteration: {selected['iteration_path']}")
+                for item in selected[:3]:
+                    if item.get("area_path"):
+                        meta_bits.append(f"{item['title']} ({item['area_path']})")
                 if meta_bits:
-                    st.caption(" · ".join(meta_bits))
+                    st.caption("Ausgewählt: " + " · ".join(meta_bits))
         else:
             st.warning("Keine Epics passen zum Filter.")
     else:
@@ -226,17 +269,17 @@ else:
 
 # Optional: manuelle Eingabe als Fallback (falls Epic in einem anderen Projekt liegt oder
 # noch nicht über den Filter sichtbar ist)
-with st.expander("➕ Epic manuell per ID/URL angeben", expanded=False):
+with st.expander("➕ Epics manuell per ID/URL angeben", expanded=False):
     manual = st.text_input(
-        "Epic-ID oder Browser-URL",
+        "Epic-ID(s) oder Browser-URL(s)",
         value="",
-        placeholder="175907 oder https://dev.azure.com/.../_workitems/edit/175907",
+        placeholder="175907, 175908 oder https://dev.azure.com/.../_workitems/edit/175907",
     )
     if manual.strip():
-        m = re.search(r"(\d+)", manual)
-        if m:
-            epic_id = int(m.group(1))
-            st.success(f"Manuelle ID: #{epic_id}")
+        manual_ids = [int(m.group(1)) for m in re.finditer(r"(\d+)", manual)]
+        if manual_ids:
+            selected_epic_ids = list(dict.fromkeys([*selected_epic_ids, *manual_ids]))
+            st.success("Manuelle IDs: " + ", ".join(f"#{item}" for item in selected_epic_ids))
 
 
 # ===== 4. Schritt: Output =====
@@ -282,6 +325,35 @@ selected_types = st.multiselect(
 if not selected_types:
     st.warning("Mindestens ein Typ muss gewählt sein – sonst kommt nichts ins Dokument.")
 
+saved_tags_str = cfg.get("TAGS", "")
+selected_tags = [t.strip() for t in saved_tags_str.split(",") if t.strip()]
+
+if st.session_state.tags:
+    selected_tags = st.multiselect(
+        "Tags filtern (aus dem Projekt)",
+        options=st.session_state.tags,
+        default=selected_tags,
+        help="Wähle einen oder mehrere Tags aus der Projekt-Liste aus Azure DevOps.",
+    )
+else:
+    selected_tags_input = st.text_input(
+        "Tags filtern (1 oder mehrere, getrennt durch Komma oder Semikolon)",
+        value=",".join(selected_tags),
+        placeholder="z.B. backend, wichtig",
+        help="Bitte zuerst auf 'Tags aus Projekt laden' klicken, damit eine Auswahl verfügbar ist.",
+    )
+
+    def parse_tags(value: str) -> list[str]:
+        parts = re.split(r"[,;]\s*", value.strip())
+        return [p.strip() for p in parts if p and p.strip()]
+
+    selected_tags = parse_tags(selected_tags_input)
+
+if selected_tags:
+    st.caption(f"Tag-Filter aktiv: {', '.join(selected_tags)}")
+else:
+    st.caption("Kein Tag-Filter aktiv – alle Work Items mit den gewählten Typen werden aufgenommen.")
+
 # ----- Work-Item-Nummer neben Titel anzeigen? -----
 show_wi_id_default = cfg.get("SHOW_WI_ID", "true").lower() in ("1", "true", "yes", "ja", "y")
 show_wi_id = st.checkbox(
@@ -304,14 +376,14 @@ show_estimates = st.checkbox(
 
 st.divider()
 
-generate_disabled = not (pat and project and epic_id and selected_types)
+generate_disabled = not (pat and project and selected_epic_ids and selected_types)
 help_msg = None
 if not pat:
     help_msg = "PAT fehlt"
 elif not project:
     help_msg = "Projekt fehlt"
-elif not epic_id:
-    help_msg = "Epic noch nicht ausgewählt"
+elif not selected_epic_ids:
+    help_msg = "Mindestens ein Epic muss ausgewählt sein"
 elif not selected_types:
     help_msg = "Mindestens ein Work-Item-Typ muss gewählt sein"
 
@@ -324,23 +396,33 @@ if st.button(
 ):
     try:
         with st.status("Verbinde zu Azure DevOps...", expanded=True) as status:
-            client = AzureDevOpsClient(org_url, project, pat)
+            client = AzureDevOpsClient(
+                org_url,
+                project,
+                pat,
+                get_project_id(project) or project,
+            )
             client.test_connection()
 
             status.update(label="Lade Work-Item-Hierarchie...")
-            items = client.get_descendants(epic_id)
-            st.write(f"📦 {len(items)} Work Items gefunden")
+            trees = []
+            total_items = 0
+            for epic_id in selected_epic_ids:
+                items = client.get_descendants(epic_id)
+                total_items += len(items)
+                tree = client.build_tree(items, epic_id)
+                if tree is None:
+                    status.update(label="Epic nicht gefunden", state="error")
+                    st.error(f"Epic mit ID {epic_id} nicht im Projekt '{project}' gefunden.")
+                    st.stop()
+                trees.append(tree)
 
-            tree = client.build_tree(items, epic_id)
-            if tree is None:
-                status.update(label="Epic nicht gefunden", state="error")
-                st.error(f"Epic mit ID {epic_id} nicht im Projekt '{project}' gefunden.")
-                st.stop()
-
-            n_features = sum(1 for c in tree.children if c.work_item_type == "Feature")
+            st.write(f"📦 {total_items} Work Items gefunden über {len(trees)} Epic(s)")
+            n_features = sum(sum(1 for c in tree.children if c.work_item_type == "Feature") for tree in trees)
             n_stories = sum(
-                1 for f in tree.children for s in f.children
-                if s.work_item_type in ("User Story", "Product Backlog Item", "Issue", "Bug")
+                sum(1 for f in tree.children for s in f.children
+                    if s.work_item_type in ("User Story", "Product Backlog Item", "Issue", "Bug"))
+                for tree in trees
             )
             st.write(f"🧩 Davon Features: {n_features}, Stories: {n_stories}")
 
@@ -351,10 +433,11 @@ if st.button(
                 str(TEMPLATE_PATH),
                 devops_client=client,
                 allowed_types=set(selected_types) if selected_types else None,
+                allowed_tags=set(selected_tags) if selected_tags else None,
                 show_work_item_id=show_wi_id,
                 show_estimates_section=show_estimates,
             )
-            builder.build(tree, customer, str(out_path))
+            builder.build(trees, customer, str(out_path))
 
             status.update(label="Fertig!", state="complete")
 
@@ -367,6 +450,7 @@ if st.button(
             "TYPES": ",".join(selected_types),
             "SHOW_WI_ID": "true" if show_wi_id else "false",
             "SHOW_ESTIMATES": "true" if show_estimates else "false",
+            "TAGS": ",".join(selected_tags),
         })
 
         st.success(f"Dokument erstellt: {out_path.name}")

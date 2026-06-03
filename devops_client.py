@@ -10,6 +10,7 @@ import base64
 import re
 from dataclasses import dataclass, field
 from typing import Optional
+from urllib.parse import quote
 
 import requests
 
@@ -43,10 +44,20 @@ class AzureDevOpsClient:
     Authentifizierung via Personal Access Token (PAT).
     """
 
-    def __init__(self, organization_url: str, project: str, pat: str):
+    def __init__(
+        self,
+        organization_url: str,
+        project: str = "",
+        pat: str = "",
+        project_id: str = "",
+        *extra_args,
+    ):
         # Organisations-URL normalisieren (Trailing-Slash etc.)
-        self.organization_url = organization_url.rstrip("/")
+        # Einige Hot-Reload-/Legacy-Pfade übergeben einen zusätzlichen Positionsparameter;
+        # wir akzeptieren ihn, ohne die App daran zu scheitern.
+        self.organization_url = organization_url.rstrip("/") if organization_url else ""
         self.project = project
+        self.project_id = project_id or project
         self.pat = pat
         # PAT in HTTP Basic Auth (leerer Username)
         token = base64.b64encode(f":{pat}".encode("utf-8")).decode("ascii")
@@ -75,7 +86,8 @@ class AzureDevOpsClient:
 
     def test_connection(self) -> str:
         """Prüft den Zugang. Gibt den Project-Namen zurück."""
-        url = f"{self.organization_url}/_apis/projects/{self.project}"
+        project_path = quote(self.project_id, safe="")
+        url = f"{self.organization_url}/_apis/projects/{project_path}"
         data = self._get(url)
         return data.get("name", "")
 
@@ -96,7 +108,8 @@ class AzureDevOpsClient:
                 + "ORDER BY [System.Title] ASC"
             )
         }
-        url = f"{self.organization_url}/{self.project}/_apis/wit/wiql"
+        project_path = quote(self.project_id, safe="")
+        url = f"{self.organization_url}/{project_path}/_apis/wit/wiql"
         result = self._post(url, wiql)
         ids = [r["id"] for r in result.get("workItems", [])]
         if not ids:
@@ -150,9 +163,60 @@ class AzureDevOpsClient:
         projects.sort(key=lambda x: x["name"].lower())
         return projects
 
+    def list_tags(self) -> list[str]:
+        """Liest alle eindeutigen Tags aus dem konfigurierten Projekt aus Azure DevOps."""
+        try:
+            project_path = quote(self.project_id, safe="")
+            url = f"{self.organization_url}/{project_path}/_apis/wit/workItemTags"
+            r = self.session.get(url, params={"api-version": "7.1-preview.4"}, timeout=60)
+            r.raise_for_status()
+            data = r.json()
+            tags = []
+            for entry in data.get("value", []) or []:
+                name = entry.get("name") or entry.get("text") or entry.get("tag") or ""
+                if isinstance(name, str) and name.strip():
+                    tags.append(name.strip())
+            return sorted({t.lower() for t in tags})
+        except Exception:
+            # Fallback: direkt über die WorkItems-Batch-API, ohne WIQL-Query.
+            # Das vermeidet die 400er-Fehler bei Projektnamen mit Leerzeichen.
+            project_path = quote(self.project_id, safe="")
+            url = f"{self.organization_url}/{project_path}/_apis/wit/wiql"
+            try:
+                result = self._post(url, {
+                    "query": (
+                        "SELECT [System.Id] "
+                        "FROM WorkItems "
+                        "WHERE [System.Tags] <> '' "
+                        "ORDER BY [System.Id] ASC"
+                    )
+                })
+            except Exception:
+                return []
+
+            ids = [r["id"] for r in result.get("workItems", [])]
+            if not ids:
+                return []
+
+            tags_set = set()
+            for i in range(0, len(ids), 200):
+                chunk = ids[i:i + 200]
+                url = f"{self.organization_url}/_apis/wit/workitemsbatch"
+                body = {"ids": chunk, "fields": ["System.Tags"]}
+                data = self._post(url, body)
+                for raw in data.get("value", []):
+                    field_tags = raw.get("fields", {}).get("System.Tags", "") or ""
+                    for tag in re.split(r"[;]+", field_tags):
+                        clean = tag.strip().lower()
+                        if clean:
+                            tags_set.add(clean)
+
+            return sorted(tags_set)
+
     def get_work_item(self, work_item_id: int) -> WorkItem:
         """Einzelnes Work Item mit allen Feldern und Relationen abrufen."""
-        url = f"{self.organization_url}/{self.project}/_apis/wit/workitems/{work_item_id}"
+        project_path = quote(self.project_id, safe="")
+        url = f"{self.organization_url}/{project_path}/_apis/wit/workitems/{work_item_id}"
         data = self._get(url, **{"$expand": "all"})
         return self._parse_work_item(data)
 
@@ -170,7 +234,8 @@ class AzureDevOpsClient:
                 "MODE (Recursive)"
             )
         }
-        url = f"{self.organization_url}/{self.project}/_apis/wit/wiql"
+        project_path = quote(self.project_id, safe="")
+        url = f"{self.organization_url}/{project_path}/_apis/wit/wiql"
         result = self._post(url, wiql)
         rels = result.get("workItemRelations", [])
         ids = []

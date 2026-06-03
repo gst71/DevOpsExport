@@ -1,0 +1,12 @@
+# Local environment / secrets
+config.txt
+.env
+.env.*
+
+# Python caches
+__pycache__/
+*.py[cod]
+
+# Streamlit / local outputs
+.streamlit/
+output/
