@@ -78,7 +78,7 @@ def normalize_project_name(name: str) -> str:
 # ----- UI -----
 
 st.set_page_config(
-    page_title="bossinfo • Detailkonzept-Generator",
+    page_title="bossinfo • DevOps Export",
     page_icon="📄",
     layout="centered",
 )
@@ -120,7 +120,7 @@ label[data-baseweb="radio"] input:checked + div > div {
 </style>
 """, unsafe_allow_html=True)
 
-st.title("📄 Detailkonzept-Generator")
+st.title("📄 DevOps Export")
 st.caption("Exportiert Azure DevOps Work Items eines Epics in ein Word-Dokument im bossinfo-Style.")
 
 if not TEMPLATE_PATH.exists():
