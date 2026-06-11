@@ -100,6 +100,23 @@ button[kind="primary"]:hover, button[kind="primaryFormSubmit"]:hover {
     background-color: #1D4ED8 !important;
     border-color: #1D4ED8 !important;
 }
+/* Checkbox: angekreuzte Box */
+label[data-baseweb="checkbox"] input:checked + span {
+    background-color: #2563EB !important;
+    border-color: #2563EB !important;
+}
+/* Toggle: aktivierter Schalter (Track) */
+label[data-baseweb="checkbox"] input:checked + div {
+    background-color: #2563EB !important;
+    border-color: #2563EB !important;
+}
+/* Radio-Buttons: Ring + Punkt der Auswahl */
+label[data-baseweb="radio"] input:checked + div {
+    border-color: #2563EB !important;
+}
+label[data-baseweb="radio"] input:checked + div > div {
+    background-color: #2563EB !important;
+}
 </style>
 """, unsafe_allow_html=True)
 
