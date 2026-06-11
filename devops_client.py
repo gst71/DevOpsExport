@@ -163,55 +163,61 @@ class AzureDevOpsClient:
 
     def list_tags(self) -> list[str]:
         """Liest alle eindeutigen Tags aus dem konfigurierten Projekt aus Azure DevOps."""
+        project_path = quote(self.project_id, safe="")
+
+        # Primaer: offizieller Tags-Endpunkt (GET .../{project}/_apis/wit/tags)
         try:
-            project_path = quote(self.project_id, safe="")
-            url = f"{self.organization_url}/{project_path}/_apis/wit/workItemTags"
-            r = self.session.get(url, params={"api-version": "7.1-preview.4"}, timeout=60)
+            url = f"{self.organization_url}/{project_path}/_apis/wit/tags"
+            r = self.session.get(url, params={"api-version": "7.1-preview.1"}, timeout=60)
             r.raise_for_status()
             data = r.json()
             tags = []
             for entry in data.get("value", []) or []:
-                name = entry.get("name") or entry.get("text") or entry.get("tag") or ""
+                name = entry.get("name") or ""
                 if isinstance(name, str) and name.strip():
                     tags.append(name.strip())
-            return sorted({t.lower() for t in tags})
+            if tags:
+                return sorted({t.lower() for t in tags})
         except Exception:
-            # Fallback: Tags direkt aus Work Items im aktuellen Projekt lesen.
-            # Das ist robuster bei Projektnamen mit Leerzeichen oder API-Varianten.
-            project_path = quote(self.project_id, safe="")
-            url = f"{self.organization_url}/{project_path}/_apis/wit/wiql"
+            pass
+
+        # Fallback: Tags direkt aus Work Items im aktuellen Projekt lesen.
+        # Hinweis: [System.Tags] unterstuetzt in WIQL nur Contains/Not Contains,
+        # daher alle Work Items des Projekts holen und Tags clientseitig filtern.
+        url = f"{self.organization_url}/{project_path}/_apis/wit/wiql"
+        try:
+            result = self._post(url, {
+                "query": (
+                    "SELECT [System.Id] "
+                    "FROM WorkItems "
+                    "WHERE [System.TeamProject] = @project "
+                    "ORDER BY [System.ChangedDate] DESC"
+                )
+            }, **{"$top": 5000})
+        except Exception:
+            return []
+
+        ids = [wi["id"] for wi in result.get("workItems", [])]
+        if not ids:
+            return []
+
+        tags_set = set()
+        for i in range(0, len(ids), 200):
+            chunk = ids[i:i + 200]
+            batch_url = f"{self.organization_url}/_apis/wit/workitemsbatch"
+            body = {"ids": chunk, "fields": ["System.Tags"]}
             try:
-                project_filter = f"AND [System.TeamProject] = '{self.project}'" if self.project else ""
-                result = self._post(url, {
-                    "query": (
-                        "SELECT [System.Id] "
-                        "FROM WorkItems "
-                        "WHERE [System.Tags] <> '' "
-                        f"{project_filter} "
-                        "ORDER BY [System.Id] ASC"
-                    )
-                })
+                data = self._post(batch_url, body)
             except Exception:
-                return []
+                continue
+            for raw in data.get("value", []):
+                field_tags = raw.get("fields", {}).get("System.Tags", "") or ""
+                for tag in re.split(r"[;,]+", field_tags):
+                    clean = tag.strip().lower()
+                    if clean:
+                        tags_set.add(clean)
 
-            ids = [r["id"] for r in result.get("workItems", [])]
-            if not ids:
-                return []
-
-            tags_set = set()
-            for i in range(0, len(ids), 200):
-                chunk = ids[i:i + 200]
-                url = f"{self.organization_url}/_apis/wit/workitemsbatch"
-                body = {"ids": chunk, "fields": ["System.Tags"]}
-                data = self._post(url, body)
-                for raw in data.get("value", []):
-                    field_tags = raw.get("fields", {}).get("System.Tags", "") or ""
-                    for tag in re.split(r"[;,]+", field_tags):
-                        clean = tag.strip().lower()
-                        if clean:
-                            tags_set.add(clean)
-
-            return sorted(tags_set)
+        return sorted(tags_set)
 
     def get_work_item(self, work_item_id: int) -> WorkItem:
         """Einzelnes Work Item mit allen Feldern und Relationen abrufen."""
