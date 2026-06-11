@@ -100,22 +100,20 @@ button[kind="primary"]:hover, button[kind="primaryFormSubmit"]:hover {
     background-color: #1D4ED8 !important;
     border-color: #1D4ED8 !important;
 }
-/* Checkbox: angekreuzte Box */
-label[data-baseweb="checkbox"] input:checked + span {
+/* Checkbox/Toggle: nur das Kaestchen bzw. der Schalter (erstes visuelles Element),
+   nicht der Beschriftungstext */
+label[data-baseweb="checkbox"]:has(input:checked) > span:first-of-type {
     background-color: #2563EB !important;
     border-color: #2563EB !important;
 }
-/* Toggle: aktivierter Schalter (Track) */
-label[data-baseweb="checkbox"] input:checked + div {
+label[data-baseweb="checkbox"]:has(input[type="checkbox"]:checked) > div:first-child {
     background-color: #2563EB !important;
     border-color: #2563EB !important;
 }
-/* Radio-Buttons: Ring + Punkt der Auswahl */
-label[data-baseweb="radio"] input:checked + div {
-    border-color: #2563EB !important;
-}
-label[data-baseweb="radio"] input:checked + div > div {
+/* Radio-Buttons: nur der Auswahlkreis */
+label[data-baseweb="radio"]:has(input:checked) > div:first-child {
     background-color: #2563EB !important;
+    border-color: #2563EB !important;
 }
 </style>
 """, unsafe_allow_html=True)
