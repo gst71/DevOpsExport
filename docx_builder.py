@@ -398,6 +398,13 @@ class DetailkonzeptBuilder:
         normalized.update({t.strip().lower() for t in (tags or "").split(",") if t and t.strip()})
         return bool(normalized & self.allowed_tags)
 
+    def _tag_in_subtree(self, wi: WorkItem) -> bool:
+        """True, wenn das Work Item selbst ODER ein Nachkomme den Tag-Filter erfuellt.
+        So bleiben Eltern als Kontext erhalten, wenn nur Kinder getaggt sind."""
+        if self._tag_allowed(wi.tags):
+            return True
+        return any(self._tag_in_subtree(c) for c in wi.children)
+
     # ----- Public API -----
 
     def build(self, epic_trees: WorkItem | list[WorkItem], customer_name: str, output_path: str) -> str:
@@ -597,7 +604,10 @@ class DetailkonzeptBuilder:
             # Type-Filter: ist dieser Typ aktiv?
             if not self._type_allowed(feature.work_item_type):
                 continue
-            if not self._tag_allowed(feature.tags):
+            # Tag-Filter: Feature zaehlt, wenn es selbst den Tag hat (vererbt dann
+            # an alle Kinder) oder wenn ein Nachkomme den Tag traegt (Kontext).
+            feature_match = self._tag_allowed(feature.tags)
+            if not (feature_match or self._tag_in_subtree(feature)):
                 continue
 
             self._add_heading(doc, feature.title, level=1,
@@ -617,7 +627,8 @@ class DetailkonzeptBuilder:
             for story in stories:
                 if not self._type_allowed(story.work_item_type):
                     continue
-                if not self._tag_allowed(story.tags):
+                story_match = feature_match or self._tag_allowed(story.tags)
+                if not (story_match or self._tag_in_subtree(story)):
                     continue
                 self._add_heading(doc, story.title, level=2,
                                   work_item_id=story.id, work_item_url=story.url)
@@ -631,7 +642,7 @@ class DetailkonzeptBuilder:
                 for task in story.children:
                     if not self._type_allowed(task.work_item_type):
                         continue
-                    if not self._tag_allowed(task.tags):
+                    if not (story_match or self._tag_allowed(task.tags)):
                         continue
                     self._add_heading(doc, task.title, level=3,
                                       work_item_id=task.id, work_item_url=task.url)
@@ -738,16 +749,18 @@ class DetailkonzeptBuilder:
         """
         result: list[tuple[WorkItem, float, float]] = []
 
-        def walk(node: WorkItem):
+        def walk(node: WorkItem, inherited: bool = False):
+            matched = inherited or self._tag_allowed(node.tags)
             dev = self._get_estimate(node.raw_fields, self._DEV_ESTIMATE_FIELDS)
             pl = self._get_estimate(node.raw_fields, self._PL_ESTIMATE_FIELDS,
                                     fallback_pattern="pl")
-            # Mindestens einer der beiden Werte muss > 0 sein
-            # und der Typ sowie Tags muessen im Filter erlaubt sein.
-            if ((dev and dev > 0) or (pl and pl > 0)) and self._type_allowed(node.work_item_type) and self._tag_allowed(node.tags):
+            # Mindestens einer der beiden Werte muss > 0 sein, der Typ erlaubt
+            # und das Item per Tag (selbst/vererbt) oder als Kontext-Elternteil enthalten sein.
+            if ((dev and dev > 0) or (pl and pl > 0)) and self._type_allowed(node.work_item_type) \
+                    and (matched or self._tag_in_subtree(node)):
                 result.append((node, dev, pl))
             for child in node.children:
-                walk(child)
+                walk(child, matched)
 
         walk(root)
         return result
