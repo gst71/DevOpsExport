@@ -430,6 +430,40 @@ class DetailkonzeptBuilder:
         doc.save(output_path)
         return output_path
 
+    def build_from_query(self, items: list[WorkItem], query_name: str,
+                         customer_name: str, output_path: str) -> str:
+        """
+        Baut das Dokument aus Query-Resultaten: alle Work Items als Kapitel (H1)
+        EXAKT in der Reihenfolge der Query, ohne Umgruppierung nach Hierarchie/Typ.
+        """
+        doc = Document(self.template_path)
+        self._clear_body(doc)
+
+        pseudo = WorkItem(id=0, work_item_type="Epic", title=query_name)
+        self._add_title_page(doc, [pseudo], customer_name)
+        self._add_page_break(doc)
+        self._add_toc_placeholder(doc)
+        self._add_page_break(doc)
+
+        for wi in items:
+            if not self._type_allowed(wi.work_item_type):
+                continue
+            if not self._tag_allowed(wi.tags):
+                continue
+            self._add_heading(doc, wi.title, level=1,
+                              work_item_id=wi.id, work_item_url=wi.url)
+            if wi.description_html.strip():
+                self._add_html(doc, wi.description_html)
+            if wi.acceptance_html.strip():
+                self._add_kommentar_intern(doc, "Acceptance Criteria")
+                self._add_html(doc, wi.acceptance_html)
+
+        if customer_name:
+            self._replace_placeholder(doc, "[Kunde]", customer_name)
+        self._cleanup_empty_paragraphs(doc)
+        doc.save(output_path)
+        return output_path
+
     def _cleanup_empty_paragraphs(self, doc: Document) -> None:
         """
         Bereinigt ueberfluessige Leerabsaetze:

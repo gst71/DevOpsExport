@@ -15,7 +15,7 @@ from pathlib import Path
 
 import streamlit as st
 
-from devops_client import AzureDevOpsClient, WorkItem
+from devops_client import AzureDevOpsClient
 from docx_builder import DetailkonzeptBuilder
 
 
@@ -255,17 +255,7 @@ if source_mode == "Epics":
             st.warning("Projekt- oder Filter-Auswahl wurde geändert. Bitte „Epics laden\" erneut klicken.")
 
         if st.session_state.epics:
-            # Suchfeld für lange Listen
-            search = st.text_input(
-                "🔎 Suche im Epic-Titel",
-                value="",
-                placeholder="z.B. Detailkonzept, DYCE, ..."
-            )
             filtered = st.session_state.epics
-            if search.strip():
-                q = search.strip().lower()
-                filtered = [e for e in st.session_state.epics if q in (e["title"] or "").lower()]
-            st.caption(f"{len(filtered)} von {len(st.session_state.epics)} Epics passen zum Filter.")
 
             if filtered:
                 def fmt(e: dict) -> str:
@@ -293,20 +283,6 @@ if source_mode == "Epics":
             st.info("Klicke auf 🔄 Epics laden, um die Epics aus dem Projekt zu holen.")
     else:
         st.info("Zugang eingeben und Projekt wählen, dann können die Epics geladen werden.")
-
-    # Optional: manuelle Eingabe als Fallback (falls Epic in einem anderen Projekt liegt oder
-    # noch nicht über den Filter sichtbar ist)
-    with st.expander("➕ Epics manuell per ID/URL angeben", expanded=False):
-        manual = st.text_input(
-            "Epic-ID(s) oder Browser-URL(s)",
-            value="",
-            placeholder="175907, 175908 oder https://dev.azure.com/.../_workitems/edit/175907",
-        )
-        if manual.strip():
-            manual_ids = [int(m.group(1)) for m in re.finditer(r"(\d+)", manual)]
-            if manual_ids:
-                selected_epic_ids = list(dict.fromkeys([*selected_epic_ids, *manual_ids]))
-                st.success("Manuelle IDs: " + ", ".join(f"#{item}" for item in selected_epic_ids))
 
 else:
     if project and pat:
@@ -481,25 +457,18 @@ if st.button(
             client.test_connection()
 
             trees = []
+            query_items = []
             total_items = 0
             if source_mode == "Query":
                 status.update(label=f"Führe Query '{selected_query['name']}' aus...")
-                roots = client.run_query(selected_query["id"])
-                if not roots:
+                # Flache Liste in EXAKT der Reihenfolge der Query (keine Umgruppierung)
+                query_items = client.run_query_flat(selected_query["id"])
+                if not query_items:
                     status.update(label="Query lieferte keine Ergebnisse", state="error")
                     st.error(f"Die Query '{selected_query['name']}' lieferte keine Work Items.")
                     st.stop()
-
-                def count_nodes(n: WorkItem) -> int:
-                    return 1 + sum(count_nodes(c) for c in n.children)
-
-                total_items = sum(count_nodes(r) for r in roots)
-                # Pseudo-Epic als Wurzel: so bleibt die Dokumentstruktur erhalten
-                # (Titelblatt mit Query-Name, Resultate als Kapitel-Hierarchie).
-                pseudo = WorkItem(id=0, work_item_type="Epic", title=selected_query["name"])
-                pseudo.children = roots
-                trees = [pseudo]
-                st.write(f"📦 {total_items} Work Items aus Query '{selected_query['name']}'")
+                total_items = len(query_items)
+                st.write(f"📦 {total_items} Work Items aus Query '{selected_query['name']}' (Reihenfolge wie im Query)")
             else:
                 status.update(label="Lade Work-Item-Hierarchie...")
                 for epic_id in selected_epic_ids:
@@ -532,7 +501,10 @@ if st.button(
                 show_work_item_id=show_wi_id,
                 show_estimates_section=show_estimates,
             )
-            builder.build(trees, customer, str(out_path))
+            if source_mode == "Query":
+                builder.build_from_query(query_items, selected_query["name"], customer, str(out_path))
+            else:
+                builder.build(trees, customer, str(out_path))
 
             status.update(label="Fertig!", state="complete")
 

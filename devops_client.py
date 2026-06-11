@@ -264,6 +264,43 @@ class AzureDevOpsClient:
             Resultats rekonstruiert; Items ohne Parent im Resultat werden Wurzeln.
         Die Reihenfolge der Query-Resultate bleibt erhalten.
         """
+        ids, parent_of = self._run_query_ids(query_id)
+        if not ids:
+            return []
+
+        by_id = {wi.id: wi for wi in self._get_work_items_batch(ids)}
+        for wi in by_id.values():
+            wi.children = []
+
+        roots: list[WorkItem] = []
+        for wid in ids:
+            wi = by_id.get(wid)
+            if wi is None:
+                continue
+            # Parent aus Query-Relation, sonst aus dem Work-Item-Link
+            pid = parent_of.get(wid, wi.parent_id)
+            if pid is not None and pid != wid and pid in by_id:
+                by_id[pid].children.append(wi)
+            else:
+                roots.append(wi)
+        return roots
+
+    def run_query_flat(self, query_id: str) -> list[WorkItem]:
+        """
+        Fuehrt eine gespeicherte Query aus und liefert die Resultate als flache
+        Liste EXAKT in der Reihenfolge der Query (keine Umgruppierung).
+        """
+        ids, _ = self._run_query_ids(query_id)
+        if not ids:
+            return []
+        by_id = {wi.id: wi for wi in self._get_work_items_batch(ids)}
+        items = [by_id[i] for i in ids if i in by_id]
+        for wi in items:
+            wi.children = []
+        return items
+
+    def _run_query_ids(self, query_id: str) -> tuple[list[int], dict[int, int]]:
+        """Query ausfuehren; liefert (IDs in Query-Reihenfolge, Parent-Zuordnung aus Relationen)."""
         project_path = quote(self.project_id, safe="")
         url = f"{self.organization_url}/{project_path}/_apis/wit/wiql/{query_id}"
         result = self._get(url, **{"$top": 5000})
@@ -287,26 +324,7 @@ class AzureDevOpsClient:
             parent_of = {}
             ids = [w["id"] for w in result.get("workItems", []) or []]
 
-        ids = list(dict.fromkeys(ids))
-        if not ids:
-            return []
-
-        by_id = {wi.id: wi for wi in self._get_work_items_batch(ids)}
-        for wi in by_id.values():
-            wi.children = []
-
-        roots: list[WorkItem] = []
-        for wid in ids:
-            wi = by_id.get(wid)
-            if wi is None:
-                continue
-            # Parent aus Query-Relation, sonst aus dem Work-Item-Link
-            pid = parent_of.get(wid, wi.parent_id)
-            if pid is not None and pid != wid and pid in by_id:
-                by_id[pid].children.append(wi)
-            else:
-                roots.append(wi)
-        return roots
+        return list(dict.fromkeys(ids)), parent_of
 
     def get_work_item(self, work_item_id: int) -> WorkItem:
         """Einzelnes Work Item mit allen Feldern und Relationen abrufen."""
