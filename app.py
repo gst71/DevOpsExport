@@ -15,7 +15,7 @@ from pathlib import Path
 
 import streamlit as st
 
-from devops_client import AzureDevOpsClient
+from devops_client import AzureDevOpsClient, WorkItem
 from docx_builder import DetailkonzeptBuilder
 
 
@@ -82,6 +82,26 @@ st.set_page_config(
     page_icon="📄",
     layout="centered",
 )
+
+# Blaues Farbschema fuer Auswahl-Chips (Multiselect) und Primary-Buttons,
+# da aeltere Streamlit-Versionen die Theme-primaryColor dort nicht anwenden.
+st.markdown("""
+<style>
+span[data-baseweb="tag"] {
+    background-color: #2563EB !important;
+    color: #FFFFFF !important;
+}
+button[kind="primary"], button[kind="primaryFormSubmit"] {
+    background-color: #2563EB !important;
+    border-color: #2563EB !important;
+    color: #FFFFFF !important;
+}
+button[kind="primary"]:hover, button[kind="primaryFormSubmit"]:hover {
+    background-color: #1D4ED8 !important;
+    border-color: #1D4ED8 !important;
+}
+</style>
+""", unsafe_allow_html=True)
 
 st.title("📄 Detailkonzept-Generator")
 st.caption("Exportiert Azure DevOps Work Items eines Epics in ein Word-Dokument im bossinfo-Style.")
@@ -457,18 +477,25 @@ if st.button(
             client.test_connection()
 
             trees = []
-            query_items = []
             total_items = 0
             if source_mode == "Query":
                 status.update(label=f"Führe Query '{selected_query['name']}' aus...")
-                # Flache Liste in EXAKT der Reihenfolge der Query (keine Umgruppierung)
-                query_items = client.run_query_flat(selected_query["id"])
-                if not query_items:
+                roots = client.run_query(selected_query["id"])
+                if not roots:
                     status.update(label="Query lieferte keine Ergebnisse", state="error")
                     st.error(f"Die Query '{selected_query['name']}' lieferte keine Work Items.")
                     st.stop()
-                total_items = len(query_items)
-                st.write(f"📦 {total_items} Work Items aus Query '{selected_query['name']}' (Reihenfolge wie im Query)")
+
+                def count_nodes(n: WorkItem) -> int:
+                    return 1 + sum(count_nodes(c) for c in n.children)
+
+                total_items = sum(count_nodes(r) for r in roots)
+                # Pseudo-Epic als Wurzel: so bleibt die Dokumentstruktur erhalten
+                # (Titelblatt mit Query-Name, Resultate als Kapitel-Hierarchie).
+                pseudo = WorkItem(id=0, work_item_type="Epic", title=selected_query["name"])
+                pseudo.children = roots
+                trees = [pseudo]
+                st.write(f"📦 {total_items} Work Items aus Query '{selected_query['name']}'")
             else:
                 status.update(label="Lade Work-Item-Hierarchie...")
                 for epic_id in selected_epic_ids:
@@ -501,10 +528,7 @@ if st.button(
                 show_work_item_id=show_wi_id,
                 show_estimates_section=show_estimates,
             )
-            if source_mode == "Query":
-                builder.build_from_query(query_items, selected_query["name"], customer, str(out_path))
-            else:
-                builder.build(trees, customer, str(out_path))
+            builder.build(trees, customer, str(out_path))
 
             status.update(label="Fertig!", state="complete")
 
