@@ -219,6 +219,95 @@ class AzureDevOpsClient:
 
         return sorted(tags_set)
 
+    def list_queries(self) -> list[dict]:
+        """
+        Listet alle gespeicherten Queries des Projekts (Shared Queries + My Queries).
+        Gibt [{id, name, path, query_type}, ...] zurueck (nur Queries, keine Ordner).
+        query_type: "flat" | "tree" | "oneHop"
+        """
+        project_path = quote(self.project_id, safe="")
+        base = f"{self.organization_url}/{project_path}/_apis/wit/queries"
+        queries: list[dict] = []
+
+        def collect(node: dict):
+            if node.get("isFolder"):
+                children = node.get("children")
+                # Tiefere Ordner liefern Kinder nicht mit -> gezielt nachladen
+                if children is None and node.get("hasChildren"):
+                    try:
+                        data = self._get(f"{base}/{node['id']}", **{"$depth": 2, "$expand": "minimal"})
+                        children = data.get("children", [])
+                    except Exception:
+                        children = []
+                for ch in children or []:
+                    collect(ch)
+            else:
+                queries.append({
+                    "id": node.get("id", ""),
+                    "name": node.get("name", ""),
+                    "path": node.get("path", node.get("name", "")),
+                    "query_type": node.get("queryType", ""),
+                })
+
+        data = self._get(base, **{"$depth": 2, "$expand": "minimal"})
+        for root in data.get("value", []) or []:
+            collect(root)
+        queries.sort(key=lambda q: (q["path"] or "").lower())
+        return queries
+
+    def run_query(self, query_id: str) -> list[WorkItem]:
+        """
+        Fuehrt eine gespeicherte Query aus und liefert die Resultate als Liste von
+        Wurzel-WorkItems (mit children-Hierarchie).
+          - Tree-/OneHop-Queries: Hierarchie kommt direkt aus den Query-Relationen.
+          - Flat-Queries: Hierarchie wird aus den Parent-Links innerhalb des
+            Resultats rekonstruiert; Items ohne Parent im Resultat werden Wurzeln.
+        Die Reihenfolge der Query-Resultate bleibt erhalten.
+        """
+        project_path = quote(self.project_id, safe="")
+        url = f"{self.organization_url}/{project_path}/_apis/wit/wiql/{query_id}"
+        result = self._get(url, **{"$top": 5000})
+
+        if result.get("queryResultType") == "workItemLink" or result.get("workItemRelations"):
+            # Tree-/OneHop-Query: Relationen auswerten
+            order: list[int] = []
+            parent_of: dict[int, int] = {}
+            for rel in result.get("workItemRelations", []) or []:
+                tgt = (rel.get("target") or {}).get("id")
+                src = (rel.get("source") or {}).get("id")
+                if tgt is None:
+                    continue
+                if tgt not in order:
+                    order.append(tgt)
+                if src is not None:
+                    parent_of.setdefault(tgt, src)
+            ids = order + [t for t in parent_of if t not in order]
+        else:
+            # Flat-Query
+            parent_of = {}
+            ids = [w["id"] for w in result.get("workItems", []) or []]
+
+        ids = list(dict.fromkeys(ids))
+        if not ids:
+            return []
+
+        by_id = {wi.id: wi for wi in self._get_work_items_batch(ids)}
+        for wi in by_id.values():
+            wi.children = []
+
+        roots: list[WorkItem] = []
+        for wid in ids:
+            wi = by_id.get(wid)
+            if wi is None:
+                continue
+            # Parent aus Query-Relation, sonst aus dem Work-Item-Link
+            pid = parent_of.get(wid, wi.parent_id)
+            if pid is not None and pid != wid and pid in by_id:
+                by_id[pid].children.append(wi)
+            else:
+                roots.append(wi)
+        return roots
+
     def get_work_item(self, work_item_id: int) -> WorkItem:
         """Einzelnes Work Item mit allen Feldern und Relationen abrufen."""
         project_path = quote(self.project_id, safe="")

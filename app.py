@@ -15,7 +15,7 @@ from pathlib import Path
 
 import streamlit as st
 
-from devops_client import AzureDevOpsClient
+from devops_client import AzureDevOpsClient, WorkItem
 from docx_builder import DetailkonzeptBuilder
 
 
@@ -106,7 +106,7 @@ def get_project_id(name: str) -> str:
 # Session-State initialisieren
 for key, default in [("projects", []), ("epics", []),
                      ("epics_for_project", None), ("selected_project", cfg.get("PROJECT", "")),
-                     ("tags", [])]:
+                     ("tags", []), ("queries", [])]:
     if key not in st.session_state:
         st.session_state[key] = default
 
@@ -189,112 +189,170 @@ else:
 
 # ===== 3. Schritt: Epic =====
 
-st.subheader("🎯 3. Epics auswählen")
+st.subheader("🎯 3. Quelle auswählen")
+
+source_mode = st.radio(
+    "Quelle der Work Items",
+    ["Epics", "Query"],
+    index=1 if cfg.get("SOURCE", "Epics") == "Query" else 0,
+    horizontal=True,
+    help="Epics: Epics auswählen wie bisher. Query: eine in Azure DevOps "
+         "gespeicherte Query (Shared/My Queries) als Quelle verwenden – "
+         "exportiert werden die Resultate der Query.",
+)
 
 selected_epic_ids: list[int] = []
+selected_query: dict | None = None
 
-if project and pat:
-    col_x, col_y = st.columns([2, 1])
-    with col_x:
-        only_active = st.checkbox(
-            "Nur aktive Epics anzeigen (ohne 'Closed' / 'Removed')",
-            value=True,
-        )
-    with col_y:
-        if st.button("🔄 Epics laden", use_container_width=True):
-            try:
-                client = AzureDevOpsClient(
-                    org_url,
-                    project,
-                    pat,
-                    get_project_id(project) or project,
-                )
-                with st.spinner(f"Lade Epics aus '{project}'..."):
-                    st.session_state.epics = client.list_epics(only_active=only_active)
-                st.session_state.epics_for_project = (project, only_active)
-                st.success(f"{len(st.session_state.epics)} Epics gefunden.")
-            except Exception as e:
-                st.error(f"Epics konnten nicht geladen werden: {format_azure_devops_error(e)}")
-                with st.expander("Details"):
-                    st.code(traceback.format_exc())
-
-        if st.button("🏷️ Tags aus Projekt laden", use_container_width=True):
-            try:
-                client = AzureDevOpsClient(
-                    org_url,
-                    project,
-                    pat,
-                    get_project_id(project) or project,
-                )
-                with st.spinner(f"Lade Tags aus '{project}'..."):
-                    st.session_state.tags = client.list_tags()
-                if st.session_state.tags:
-                    st.success(f"{len(st.session_state.tags)} Tags gefunden.")
-                else:
-                    st.info("Keine Tags gefunden – oder der PAT hat keine ausreichenden Rechte für die Tag-Abfrage.")
-            except Exception as e:
-                st.error(f"Tags konnten nicht geladen werden: {format_azure_devops_error(e)}")
-                with st.expander("Details"):
-                    st.code(traceback.format_exc())
-
-    # Hinweis falls Cache zu Projekt-/Filter-Mix passt
-    cache_state = st.session_state.epics_for_project
-    if st.session_state.epics and cache_state and cache_state != (project, only_active):
-        st.warning("Projekt- oder Filter-Auswahl wurde geändert. Bitte „Epics laden\" erneut klicken.")
-
-    if st.session_state.epics:
-        # Suchfeld für lange Listen
-        search = st.text_input(
-            "🔎 Suche im Epic-Titel",
-            value="",
-            placeholder="z.B. Detailkonzept, DYCE, ..."
-        )
-        filtered = st.session_state.epics
-        if search.strip():
-            q = search.strip().lower()
-            filtered = [e for e in st.session_state.epics if q in (e["title"] or "").lower()]
-        st.caption(f"{len(filtered)} von {len(st.session_state.epics)} Epics passen zum Filter.")
-
-        if filtered:
-            def fmt(e: dict) -> str:
-                state_tag = f" [{e['state']}]" if e.get("state") else ""
-                return f"#{e['id']} – {e['title']}{state_tag}"
-
-            selected = st.multiselect(
-                "Epics",
-                filtered,
-                default=[],
-                format_func=fmt,
-                help="Mehrere Epics können gleichzeitig ausgewählt werden.",
+if source_mode == "Epics":
+    if project and pat:
+        col_x, col_y = st.columns([2, 1])
+        with col_x:
+            only_active = st.checkbox(
+                "Nur aktive Epics anzeigen (ohne 'Closed' / 'Removed')",
+                value=True,
             )
-            if selected:
-                selected_epic_ids = [item["id"] for item in selected]
-                meta_bits = []
-                for item in selected[:3]:
-                    if item.get("area_path"):
-                        meta_bits.append(f"{item['title']} ({item['area_path']})")
-                if meta_bits:
-                    st.caption("Ausgewählt: " + " · ".join(meta_bits))
-        else:
-            st.warning("Keine Epics passen zum Filter.")
-    else:
-        st.info("Klicke auf 🔄 Epics laden, um die Epics aus dem Projekt zu holen.")
-else:
-    st.info("Zugang eingeben und Projekt wählen, dann können die Epics geladen werden.")
+        with col_y:
+            if st.button("🔄 Epics laden", use_container_width=True):
+                try:
+                    client = AzureDevOpsClient(
+                        org_url,
+                        project,
+                        pat,
+                        get_project_id(project) or project,
+                    )
+                    with st.spinner(f"Lade Epics aus '{project}'..."):
+                        st.session_state.epics = client.list_epics(only_active=only_active)
+                    st.session_state.epics_for_project = (project, only_active)
+                    st.success(f"{len(st.session_state.epics)} Epics gefunden.")
+                except Exception as e:
+                    st.error(f"Epics konnten nicht geladen werden: {format_azure_devops_error(e)}")
+                    with st.expander("Details"):
+                        st.code(traceback.format_exc())
 
-# Optional: manuelle Eingabe als Fallback (falls Epic in einem anderen Projekt liegt oder
-# noch nicht über den Filter sichtbar ist)
-with st.expander("➕ Epics manuell per ID/URL angeben", expanded=False):
-    manual = st.text_input(
-        "Epic-ID(s) oder Browser-URL(s)",
-        value="",
-        placeholder="175907, 175908 oder https://dev.azure.com/.../_workitems/edit/175907",
-    )
-    if manual.strip():
-        manual_ids = [int(m.group(1)) for m in re.finditer(r"(\d+)", manual)]
-        if manual_ids:
-            selected_epic_ids = list(dict.fromkeys([*selected_epic_ids, *manual_ids]))
-            st.success("Manuelle IDs: " + ", ".join(f"#{item}" for item in selected_epic_ids))
+            if st.button("🏷️ Tags aus Projekt laden", use_container_width=True):
+                try:
+                    client = AzureDevOpsClient(
+                        org_url,
+                        project,
+                        pat,
+                        get_project_id(project) or project,
+                    )
+                    with st.spinner(f"Lade Tags aus '{project}'..."):
+                        st.session_state.tags = client.list_tags()
+                    if st.session_state.tags:
+                        st.success(f"{len(st.session_state.tags)} Tags gefunden.")
+                    else:
+                        st.info("Keine Tags gefunden – oder der PAT hat keine ausreichenden Rechte für die Tag-Abfrage.")
+                except Exception as e:
+                    st.error(f"Tags konnten nicht geladen werden: {format_azure_devops_error(e)}")
+                    with st.expander("Details"):
+                        st.code(traceback.format_exc())
+
+        # Hinweis falls Cache zu Projekt-/Filter-Mix passt
+        cache_state = st.session_state.epics_for_project
+        if st.session_state.epics and cache_state and cache_state != (project, only_active):
+            st.warning("Projekt- oder Filter-Auswahl wurde geändert. Bitte „Epics laden\" erneut klicken.")
+
+        if st.session_state.epics:
+            # Suchfeld für lange Listen
+            search = st.text_input(
+                "🔎 Suche im Epic-Titel",
+                value="",
+                placeholder="z.B. Detailkonzept, DYCE, ..."
+            )
+            filtered = st.session_state.epics
+            if search.strip():
+                q = search.strip().lower()
+                filtered = [e for e in st.session_state.epics if q in (e["title"] or "").lower()]
+            st.caption(f"{len(filtered)} von {len(st.session_state.epics)} Epics passen zum Filter.")
+
+            if filtered:
+                def fmt(e: dict) -> str:
+                    state_tag = f" [{e['state']}]" if e.get("state") else ""
+                    return f"#{e['id']} – {e['title']}{state_tag}"
+
+                selected = st.multiselect(
+                    "Epics",
+                    filtered,
+                    default=[],
+                    format_func=fmt,
+                    help="Mehrere Epics können gleichzeitig ausgewählt werden.",
+                )
+                if selected:
+                    selected_epic_ids = [item["id"] for item in selected]
+                    meta_bits = []
+                    for item in selected[:3]:
+                        if item.get("area_path"):
+                            meta_bits.append(f"{item['title']} ({item['area_path']})")
+                    if meta_bits:
+                        st.caption("Ausgewählt: " + " · ".join(meta_bits))
+            else:
+                st.warning("Keine Epics passen zum Filter.")
+        else:
+            st.info("Klicke auf 🔄 Epics laden, um die Epics aus dem Projekt zu holen.")
+    else:
+        st.info("Zugang eingeben und Projekt wählen, dann können die Epics geladen werden.")
+
+    # Optional: manuelle Eingabe als Fallback (falls Epic in einem anderen Projekt liegt oder
+    # noch nicht über den Filter sichtbar ist)
+    with st.expander("➕ Epics manuell per ID/URL angeben", expanded=False):
+        manual = st.text_input(
+            "Epic-ID(s) oder Browser-URL(s)",
+            value="",
+            placeholder="175907, 175908 oder https://dev.azure.com/.../_workitems/edit/175907",
+        )
+        if manual.strip():
+            manual_ids = [int(m.group(1)) for m in re.finditer(r"(\d+)", manual)]
+            if manual_ids:
+                selected_epic_ids = list(dict.fromkeys([*selected_epic_ids, *manual_ids]))
+                st.success("Manuelle IDs: " + ", ".join(f"#{item}" for item in selected_epic_ids))
+
+else:
+    if project and pat:
+        if st.button("🔄 Queries laden", use_container_width=True):
+            try:
+                client = AzureDevOpsClient(
+                    org_url,
+                    project,
+                    pat,
+                    get_project_id(project) or project,
+                )
+                with st.spinner(f"Lade Queries aus '{project}'..."):
+                    st.session_state.queries = client.list_queries()
+                if st.session_state.queries:
+                    st.success(f"{len(st.session_state.queries)} Queries gefunden.")
+                else:
+                    st.info("Keine gespeicherten Queries im Projekt gefunden.")
+            except Exception as e:
+                st.error(f"Queries konnten nicht geladen werden: {format_azure_devops_error(e)}")
+                with st.expander("Details"):
+                    st.code(traceback.format_exc())
+
+        if st.session_state.queries:
+            _QUERY_TYPE_LABEL = {"flat": "Liste", "tree": "Hierarchie", "oneHop": "Direkte Links"}
+
+            def fmt_query(q: dict) -> str:
+                t = _QUERY_TYPE_LABEL.get(q.get("query_type", ""), "")
+                return f"{q['path']}  [{t}]" if t else q["path"]
+
+            query_ids = [q["id"] for q in st.session_state.queries]
+            default_q_idx = 0
+            if cfg.get("QUERY_ID", "") in query_ids:
+                default_q_idx = query_ids.index(cfg.get("QUERY_ID", ""))
+            selected_query = st.selectbox(
+                "Query",
+                st.session_state.queries,
+                index=default_q_idx,
+                format_func=fmt_query,
+                help="Gespeicherte Query aus Azure DevOps. Bei Hierarchie-Queries wird "
+                     "die Hierarchie übernommen, bei Listen-Queries aus den "
+                     "Parent-Links rekonstruiert.",
+            )
+        else:
+            st.info("Klicke auf 🔄 Queries laden, um die gespeicherten Queries aus dem Projekt zu holen.")
+    else:
+        st.info("Zugang eingeben und Projekt wählen, dann können die Queries geladen werden.")
 
 
 # ===== 4. Schritt: Output =====
@@ -391,14 +449,17 @@ show_estimates = st.checkbox(
 
 st.divider()
 
-generate_disabled = not (pat and project and selected_epic_ids and selected_types)
+source_ok = bool(selected_query) if source_mode == "Query" else bool(selected_epic_ids)
+generate_disabled = not (pat and project and source_ok and selected_types)
 help_msg = None
 if not pat:
     help_msg = "PAT fehlt"
 elif not project:
     help_msg = "Projekt fehlt"
-elif not selected_epic_ids:
+elif source_mode == "Epics" and not selected_epic_ids:
     help_msg = "Mindestens ein Epic muss ausgewählt sein"
+elif source_mode == "Query" and not selected_query:
+    help_msg = "Eine Query muss ausgewählt sein"
 elif not selected_types:
     help_msg = "Mindestens ein Work-Item-Typ muss gewählt sein"
 
@@ -419,27 +480,46 @@ if st.button(
             )
             client.test_connection()
 
-            status.update(label="Lade Work-Item-Hierarchie...")
             trees = []
             total_items = 0
-            for epic_id in selected_epic_ids:
-                items = client.get_descendants(epic_id)
-                total_items += len(items)
-                tree = client.build_tree(items, epic_id)
-                if tree is None:
-                    status.update(label="Epic nicht gefunden", state="error")
-                    st.error(f"Epic mit ID {epic_id} nicht im Projekt '{project}' gefunden.")
+            if source_mode == "Query":
+                status.update(label=f"Führe Query '{selected_query['name']}' aus...")
+                roots = client.run_query(selected_query["id"])
+                if not roots:
+                    status.update(label="Query lieferte keine Ergebnisse", state="error")
+                    st.error(f"Die Query '{selected_query['name']}' lieferte keine Work Items.")
                     st.stop()
-                trees.append(tree)
 
-            st.write(f"📦 {total_items} Work Items gefunden über {len(trees)} Epic(s)")
-            n_features = sum(sum(1 for c in tree.children if c.work_item_type == "Feature") for tree in trees)
-            n_stories = sum(
-                sum(1 for f in tree.children for s in f.children
-                    if s.work_item_type in ("User Story", "Product Backlog Item", "Issue", "Bug"))
-                for tree in trees
-            )
-            st.write(f"🧩 Davon Features: {n_features}, Stories: {n_stories}")
+                def count_nodes(n: WorkItem) -> int:
+                    return 1 + sum(count_nodes(c) for c in n.children)
+
+                total_items = sum(count_nodes(r) for r in roots)
+                # Pseudo-Epic als Wurzel: so bleibt die Dokumentstruktur erhalten
+                # (Titelblatt mit Query-Name, Resultate als Kapitel-Hierarchie).
+                pseudo = WorkItem(id=0, work_item_type="Epic", title=selected_query["name"])
+                pseudo.children = roots
+                trees = [pseudo]
+                st.write(f"📦 {total_items} Work Items aus Query '{selected_query['name']}'")
+            else:
+                status.update(label="Lade Work-Item-Hierarchie...")
+                for epic_id in selected_epic_ids:
+                    items = client.get_descendants(epic_id)
+                    total_items += len(items)
+                    tree = client.build_tree(items, epic_id)
+                    if tree is None:
+                        status.update(label="Epic nicht gefunden", state="error")
+                        st.error(f"Epic mit ID {epic_id} nicht im Projekt '{project}' gefunden.")
+                        st.stop()
+                    trees.append(tree)
+
+                st.write(f"📦 {total_items} Work Items gefunden über {len(trees)} Epic(s)")
+                n_features = sum(sum(1 for c in tree.children if c.work_item_type == "Feature") for tree in trees)
+                n_stories = sum(
+                    sum(1 for f in tree.children for s in f.children
+                        if s.work_item_type in ("User Story", "Product Backlog Item", "Issue", "Bug"))
+                    for tree in trees
+                )
+                st.write(f"🧩 Davon Features: {n_features}, Stories: {n_stories}")
 
             status.update(label="Erstelle Word-Dokument...")
             out_path = APP_DIR / "output" / f"{sanitize_filename(filename_hint)}.docx"
@@ -466,6 +546,8 @@ if st.button(
             "SHOW_WI_ID": "true" if show_wi_id else "false",
             "SHOW_ESTIMATES": "true" if show_estimates else "false",
             "TAGS": ",".join(selected_tags),
+            "SOURCE": source_mode,
+            "QUERY_ID": (selected_query or {}).get("id", ""),
         })
 
         st.success(f"Dokument erstellt: {out_path.name}")
